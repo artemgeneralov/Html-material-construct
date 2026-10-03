@@ -1,0 +1,106 @@
+{
+ "formatVersion": 1,
+ "objects": [
+  {
+   "id": "anc",
+   "typeId": "anchor",
+   "kind": "COMPONENT",
+   "pos": {
+    "x": 0.0,
+    "y": 0.35
+   },
+   "rotation": 0.0,
+   "width": 0.05,
+   "height": 0.05,
+   "materialId": "steel",
+   "fixed": true,
+   "params": {}
+  },
+  {
+   "id": "spr",
+   "typeId": "spring",
+   "kind": "COMPONENT",
+   "pos": {
+    "x": 0.0,
+    "y": 0.2
+   },
+   "rotation": 0.0,
+   "width": 0.15,
+   "height": 0.03,
+   "materialId": "steel",
+   "fixed": false,
+   "params": {
+    "stiffness": 150.0,
+    "restLength": 0.2,
+    "mass": 0.02
+   }
+  },
+  {
+   "id": "wgt",
+   "typeId": "stiffjoint",
+   "kind": "COMPONENT",
+   "pos": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "width": 0.08,
+   "height": 0.08,
+   "materialId": "steel",
+   "fixed": false,
+   "params": {
+    "mass": 0.5
+   }
+  }
+ ],
+ "connections": [
+  {
+   "id": "s1",
+   "aObj": "anc",
+   "aPort": "obj",
+   "bObj": "spr",
+   "bPort": "a",
+   "type": "MECHANICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  },
+  {
+   "id": "s2",
+   "aObj": "spr",
+   "aPort": "b",
+   "bObj": "wgt",
+   "bPort": "a",
+   "type": "MECHANICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  }
+ ],
+ "customMaterials": [],
+ "customComponents": [],
+ "modules": [],
+ "planTasks": [],
+ "simulation": {
+  "gravity": 9.81,
+  "timeStep": 0.016666666666666666,
+  "airDrag": 0.02,
+  "ambientTemp": 20.0,
+  "restitution": 0.3,
+  "friction": 0.4
+ },
+ "camera": {
+  "centerX": 0.3,
+  "centerY": 0.0,
+  "zoom": 500
+ },
+ "grid": {
+  "size": 0.05,
+  "visible": true,
+  "snap": true
+ }
+}

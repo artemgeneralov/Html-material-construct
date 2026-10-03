@@ -1,0 +1,260 @@
+{
+ "formatVersion": 1,
+ "objects": [
+  {
+   "id": "bat",
+   "typeId": "battery",
+   "kind": "COMPONENT",
+   "pos": {
+    "x": -0.25,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "width": 0.12,
+   "height": 0.08,
+   "materialId": "plastic",
+   "fixed": false,
+   "params": {
+    "voltage": 4.5,
+    "internalResistance": 0.15,
+    "mass": 0.05
+   }
+  },
+  {
+   "id": "sw",
+   "typeId": "switch",
+   "kind": "COMPONENT",
+   "pos": {
+    "x": -0.05,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "width": 0.12,
+   "height": 0.08,
+   "materialId": "plastic",
+   "fixed": false,
+   "params": {
+    "resistance": 0.01,
+    "on": 1.0,
+    "mass": 0.006
+   }
+  },
+  {
+   "id": "lamp",
+   "typeId": "lamp",
+   "kind": "COMPONENT",
+   "pos": {
+    "x": 0.2,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "width": 0.12,
+   "height": 0.08,
+   "materialId": "plastic",
+   "fixed": false,
+   "params": {
+    "resistance": 30,
+    "maxCurrent": 0.3,
+    "mass": 0.015
+   }
+  },
+  {
+   "id": "w1",
+   "typeId": "wire",
+   "kind": "WIRE",
+   "pos": {
+    "x": -0.155,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "width": 0.10999999999999999,
+   "height": 0.0,
+   "materialId": "copper",
+   "fixed": false,
+   "params": {
+    "length": 0.11,
+    "radius": 0.001,
+    "mass": 0.001,
+    "resistance": 0.001,
+    "maxCurrent": 5.0,
+    "meltTemp": 1085
+   },
+   "points": [
+    {
+     "x": -0.21,
+     "y": 0.0
+    },
+    {
+     "x": -0.1,
+     "y": 0.0
+    }
+   ]
+  },
+  {
+   "id": "w2",
+   "typeId": "wire",
+   "kind": "WIRE",
+   "pos": {
+    "x": 0.075,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "width": 0.15,
+   "height": 0.0,
+   "materialId": "copper",
+   "fixed": false,
+   "params": {
+    "length": 0.15,
+    "radius": 0.001,
+    "mass": 0.001,
+    "resistance": 0.001,
+    "maxCurrent": 5.0,
+    "meltTemp": 1085
+   },
+   "points": [
+    {
+     "x": 0.0,
+     "y": 0.0
+    },
+    {
+     "x": 0.15,
+     "y": 0.0
+    }
+   ]
+  },
+  {
+   "id": "w3",
+   "typeId": "wire",
+   "kind": "WIRE",
+   "pos": {
+    "x": -0.01999999999999999,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "width": 0.54,
+   "height": 0.0,
+   "materialId": "copper",
+   "fixed": false,
+   "params": {
+    "length": 0.54,
+    "radius": 0.001,
+    "mass": 0.001,
+    "resistance": 0.001,
+    "maxCurrent": 5.0,
+    "meltTemp": 1085
+   },
+   "points": [
+    {
+     "x": 0.25,
+     "y": 0.0
+    },
+    {
+     "x": -0.29,
+     "y": 0.0
+    }
+   ]
+  }
+ ],
+ "connections": [
+  {
+   "id": "c1",
+   "aObj": "w1",
+   "aPort": "a",
+   "bObj": "bat",
+   "bPort": "gnd",
+   "type": "ELECTRICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  },
+  {
+   "id": "c2",
+   "aObj": "w1",
+   "aPort": "b",
+   "bObj": "sw",
+   "bPort": "p1",
+   "type": "ELECTRICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  },
+  {
+   "id": "c3",
+   "aObj": "w2",
+   "aPort": "a",
+   "bObj": "sw",
+   "bPort": "p2",
+   "type": "ELECTRICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  },
+  {
+   "id": "c4",
+   "aObj": "w2",
+   "aPort": "b",
+   "bObj": "lamp",
+   "bPort": "p1",
+   "type": "ELECTRICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  },
+  {
+   "id": "c5",
+   "aObj": "w3",
+   "aPort": "a",
+   "bObj": "lamp",
+   "bPort": "p2",
+   "type": "ELECTRICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  },
+  {
+   "id": "c6",
+   "aObj": "w3",
+   "aPort": "b",
+   "bObj": "bat",
+   "bPort": "v+",
+   "type": "ELECTRICAL",
+   "welded": true,
+   "weldKind": "metal",
+   "strength": 100,
+   "meltTemp": 1450,
+   "resistance": 0.001
+  }
+ ],
+ "customMaterials": [],
+ "customComponents": [],
+ "modules": [],
+ "planTasks": [],
+ "simulation": {
+  "gravity": 9.81,
+  "timeStep": 0.016666666666666666,
+  "airDrag": 0.02,
+  "ambientTemp": 20.0,
+  "restitution": 0.3,
+  "friction": 0.4
+ },
+ "camera": {
+  "centerX": 0.3,
+  "centerY": 0.0,
+  "zoom": 500
+ },
+ "grid": {
+  "size": 0.05,
+  "visible": true,
+  "snap": true
+ }
+}

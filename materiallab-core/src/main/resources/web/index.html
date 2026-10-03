@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>MaterialLab Simulator — веб-режим</title>
+<style>
+:root{--bg:#1e2229;--panel:#262b34;--acc:#4da3ff;--txt:#dfe4ea;}
+*{box-sizing:border-box}
+body{margin:0;font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--txt);display:flex;flex-direction:column;height:100vh}
+header{background:var(--panel);padding:6px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid #3a4150}
+header b{color:var(--acc);margin-right:12px}
+button,select{background:#323947;color:var(--txt);border:1px solid #44506a;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:13px}
+button:hover{border-color:var(--acc)}
+main{flex:1;display:flex;min-height:0}
+#left{width:230px;background:var(--panel);border-right:1px solid #3a4150;overflow-y:auto;padding:8px;font-size:12px}
+#center{flex:1;position:relative}
+canvas{width:100%;height:100%;display:block;cursor:crosshair}
+#right{width:280px;background:var(--panel);border-left:1px solid #3a4150;overflow-y:auto;padding:8px;font-size:12px}
+.tab{font-weight:bold;color:var(--acc);margin:10px 0 4px;text-transform:uppercase;font-size:11px}
+.item{padding:3px 6px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item:hover{background:#323947}
+.item.sel{background:#31445e}
+input[type=number],input[type=text]{width:70px;background:#181c22;color:var(--txt);border:1px solid #44506a;border-radius:4px;padding:2px 4px}
+.prop{display:flex;justify-content:space-between;margin:2px 0;gap:6px}
+footer{background:var(--panel);border-top:1px solid #3a4150;padding:4px 12px;font-size:12px;display:flex;gap:18px}
+.warn{color:#ffb020}.err{color:#ff5b5b}.ok{color:#5bd45b}
+h3{font-size:12px;margin:6px 0}
+#log{max-height:120px;overflow-y:auto;font-family:monospace;font-size:11px}
+.note{color:#8a93a6;font-size:10px;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <b>⚛ MaterialLab</b>
+  <select id="compSel"></select>
+  <button onclick="addComp()">+ Компонент</button>
+  <button onclick="startWire()" id="wireBtn">🔌 Провод</button>
+  <button onclick="startWeld()" id="weldBtn">🔥 Сварка</button>
+  <button onclick="cutSelected()">✂ Разварить</button>
+  <span style="width:14px"></span>
+  <button class="ok" onclick="api('sim/start')">▶ Пуск</button>
+  <button class="warn" onclick="api('sim/pause')">⏸ Пауза</button>
+  <button onclick="api('sim/step')">⏭ Шаг</button>
+  <button class="err" onclick="api('sim/stop')">⏹ Стоп</button>
+  <span style="width:14px"></span>
+  <select id="presetSel"></select>
+  <button onclick="loadPreset()">Загрузить пресет</button>
+  <button onclick="validate()">Проверка</button>
+  <button onclick="saveProject()">💾 Сохранить .mlab</button>
+</header>
+<main>
+  <div id="left">
+    <div class="tab">Объекты проекта</div><div id="objList"></div>
+    <div class="tab">Материалы</div><div id="matList"></div>
+    <div class="note">Значения hardness/strength/friction — инженерные приближения симуляции. Плотность, проводимость и температура плавления — справочные данные.</div>
+  </div>
+  <div id="center"><canvas id="cv"></canvas></div>
+  <div id="right">
+    <div class="tab">Свойства</div><div id="props">— выберите объект —</div>
+    <div class="tab">Журнал симуляции</div><div id="log"></div>
+    <div class="tab">Ошибки</div><div id="issues"></div>
+  </div>
+</main>
+<footer>
+  <span id="modeLbl">Режим: —</span>
+  <span id="tLbl">t = 0 с</span>
+  <span id="coord">x: 0.00, y: 0.00 м</span>
+  <span id="zoomLbl">масштаб: колесо мыши — зум, ЛКМ-drag — панорама</span>
+</footer>
+<script>
+const apiPath = p => fetch('/api/'+p);
+async function api(p, body, method){ 
+  const opt = {method: method || (body?'POST':'GET')};
+  if(body) {opt.headers={'Content-Type':'application/json'}; opt.body=JSON.stringify(body);}
+  const r = await apiPath(p+(Object.keys(opt).length&&method!=='GET'?'':''));
+  return r.json();
+}
+async function post(p,b){const r=await fetch('/api/'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json();}
+
+let state={objects:[],connections:[],mode:'STOPPED'};
+let cam={x:0.5,y:0,zoom:420};
+let sel=null, tool=null, wireStart=null, weldStart=null;
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+
+function W2S(x,y){return [ (x-cam.x)*cam.zoom+cv.width/2, cv.height/2-(y-cam.y)*cam.zoom ];}
+function S2W(x,y){return [ (x-cv.width/2)/cam.zoom+cam.x, (cv.height/2-y)/cam.zoom+cam.y ];}
+
+function draw(){
+  const dpr=devicePixelRatio||1;
+  cv.width=cv.clientWidth*dpr; cv.height=cv.clientHeight*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle='#171a20'; ctx.fillRect(0,0,cv.width,cv.height);
+  // grid
+  const g=0.05;
+  ctx.strokeStyle='#232833'; ctx.lineWidth=1;
+  for(let wx=Math.floor(S2W(0,0)[0]/g)*g; wx<S2W(cv.width,0)[0]; wx+=g){
+    const [sx]=W2S(wx,0); ctx.beginPath(); ctx.moveTo(sx,0); ctx.lineTo(sx,cv.height); ctx.stroke();
+  }
+  for(let wy=Math.ceil(S2W(0,cv.height)[1]/g)*g; wy<S2W(0,0)[1]; wy+=g){
+    const [,sy]=W2S(0,wy); ctx.beginPath(); ctx.moveTo(0,sy); ctx.lineTo(cv.width,sy); ctx.stroke();
+  }
+  // ground line
+  const [,gy]=W2S(0,-0.5); ctx.strokeStyle='#3a4150'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(cv.width,gy); ctx.stroke();
+  // wires & ropes
+  for(const o of state.objects){
+    if(o.points){
+      ctx.strokeStyle=o.state&&o.state.broken>0.5?'#ff5b5b':(o.kind==='WIRE'?'#d9863d':'#9aa5a0');
+      ctx.lineWidth=o.kind==='WIRE'?2.5:4;
+      ctx.beginPath();
+      o.points.forEach((p,i)=>{const [x,y]=W2S(p[0],p[1]); i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+      ctx.stroke();
+      // endpoints
+      for(const e of [o.points[0],o.points[o.points.length-1]]){
+        const [x,y]=W2S(e[0],e[1]);
+        ctx.fillStyle=connectedPort(o.id,'a')||connectedPort(o.id,'b')?'#5bd45b':'#8a93a6';
+        ctx.beginPath();ctx.arc(x,y,4,0,7);ctx.fill();
+      }
+    }
+  }
+  // components
+  for(const o of state.objects){
+    if(o.kind!=='COMPONENT')continue;
+    const [x,y]=W2S(o.x,o.y);
+    const w=o.width*cam.zoom,h=o.height*cam.zoom;
+    ctx.save();ctx.translate(x,y);ctx.rotate(-o.rotation);
+    const col=colorFor(o);
+    ctx.fillStyle=col; ctx.strokeStyle=sel===o.id?'#4da3ff':'#0d0f13'; ctx.lineWidth=sel===o.id?2.5:1.5;
+    roundRect(-w/2,-h/2,w,h,4); ctx.fill(); ctx.stroke();
+    // lamp/led glow
+    if((o.typeId==='lamp'||o.typeId==='led') && o.state && o.state.brightness>0.05){
+      ctx.fillStyle='rgba(255,220,80,'+Math.min(1,o.state.brightness)+')';
+      ctx.shadowColor='#ffe066'; ctx.shadowBlur=25*o.state.brightness;
+      roundRect(-w/2+3,-h/2+3,w-6,h-6,3); ctx.fill(); ctx.shadowBlur=0;
+    }
+    if(o.state&&o.state.fault>0.5){ctx.strokeStyle='#ff5b5b';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-w/2,-h/2);ctx.lineTo(w/2,h/2);ctx.stroke();}
+    ctx.restore();
+    // ports
+    for(const pt of portsOf(o)){
+      const [px,py]=W2S(pt.x,pt.y);
+      ctx.fillStyle= '#4da3ff'; ctx.beginPath();ctx.arc(px,py,3,0,7);ctx.fill();
+    }
+    ctx.fillStyle='#dfe4ea';ctx.font='11px sans-serif';ctx.textAlign='center';
+    ctx.fillText(o.name||o.typeId,x,y+h/2+13);
+    if(o.state&&o.state.current!==undefined&&Math.abs(o.state.current)>1e-4){
+      ctx.fillStyle='#8a93a6';
+      ctx.fillText(fmtA(o.state.current)+' '+fmtV(o.state.voltage),x,y-h/2-6);
+    }
+  }
+  // welds visual
+  for(const c of state.connections){
+    if(!c.welded)continue;
+    const a=obj(c.aObj),b=obj(c.bObj);if(!a||!b)continue;
+    const pa=portPos(a,c.aPort),pb=portPos(b,c.bPort);if(!pa||!pb)continue;
+    const [x1,y1]=W2S(pa[0],pa[1]),[x2,y2]=W2S(pb[0],pb[1]);
+    ctx.strokeStyle=c.type==='ELECTRICAL'?'#ffd24d':'#7ee081';ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+    ctx.fillStyle=ctx.strokeStyle;
+    ctx.beginPath();ctx.arc((x1+x2)/2,(y1+y2)/2,4,0,7);ctx.fill();
+  }
+}
+function roundRect(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function obj(id){return state.objects.find(o=>o.id===id);}
+function colorFor(o){
+  const m=(materialsById[o.material]||{}).color;
+  return m!==undefined?('rgb('+((m>>16)&255)+','+((m>>8)&255)+','+(m&255)+')'):'#8a93a6';
+}
+const PORT_POS={battery:[[-0.04,0],[0.04,0]],lamp:[[-0.05,0],[0.05,0]],led:[[-0.05,0],[0.05,0]],resistor:[[-0.05,0],[0.05,0]],
+ switch:[[-0.05,0],[0.05,0]],button:[[-0.05,0],[0.05,0]],motor:[[-0.05,0],[0.05,0]],fuse:[[-0.05,0],[0.05,0]],
+ diode:[[-0.05,0],[0.05,0]],capacitor:[[-0.05,0],[0.05,0]],rheostat:[[-0.05,0],[0.05,0]],accumulator:[[-0.04,0],[0.04,0]],
+ powersupply:[[-0.04,0],[0.04,0]],anchor:[[0,0]]};
+function portsOf(o){
+  const def=componentsById[o.typeId];
+  if(!def)return [];
+  return def.ports.map(p=>{
+    const c=Math.cos(o.rotation),s=Math.sin(o.rotation);
+    return [o.x+p.lx*c-p.ly*s, o.y+p.lx*s+p.ly*c, p.id];
+  });
+}
+function portPos(o,pid){for(const p of portsOf(o))if(p[2]===pid)return [p[0],p[1]];return null;}
+function connectedPort(objId,port){return state.connections.find(c=>(c.aObj===objId&&c.aPort===port)||(c.bObj===objId&&c.bPort===port)&&c.welded);}
+function fmtA(i){return Math.abs(i)>1?i.toFixed(2)+'А':(i*1000).toFixed(1)+'мА';}
+function fmtV(u){return u===undefined?'':Math.abs(u)>1?u.toFixed(2)+'В':(u*1000).toFixed(0)+'мВ';}
+
+// ---- interactions ----
+let dragging=false,last=[0,0],downPt=null,moved=false;
+cv.addEventListener('mousedown',e=>{downPt=[e.offsetX,e.offsetY];last=downPt;moved=false;});
+cv.addEventListener('mousemove',e=>{
+  const [wx,wy]=S2W(e.offsetX,e.offsetY);
+  document.getElementById('coord').textContent='x: '+wx.toFixed(2)+', y: '+wy.toFixed(2)+' м';
+  if(downPt&&(Math.abs(e.offsetX-downPt[0])+Math.abs(e.offsetY-downPt[1])>4))moved=true;
+  if(moved&&e.buttons===1&&!tool){ // pan
+    const [dx,dy]=[e.offsetX-last[0],e.offsetY-last[1]];
+    cam.x-=dx/cam.zoom; cam.y+=dy/cam.zoom;
+  }
+  last=[e.offsetX,e.offsetY];
+});
+window.addEventListener('mouseup',e=>{
+  if(!moved&&e.target===cv) click(S2W(e.offsetX,e.offsetY));
+  downPt=null;
+});
+cv.addEventListener('wheel',e=>{e.preventDefault();cam.zoom*=e.deltaY<0?1.12:0.89;},{passive:false});
+
+async function click([wx,wy]){
+  if(tool==='wire'){
+    if(!wireStart){wireStart=[wx,wy];toast('Провод: укажите конец');}
+    else{
+      await post('wire',{x1:wireStart[0],y1:wireStart[1],x2:wx,y2:wy,material:'copper'});
+      wireStart=null;tool=null;btnState();await refresh();
+    }
+    return;
+  }
+  if(tool==='weld'){
+    const hit=hitPort(wx,wy);
+    if(!hit){toast('Рядом нет точки подключения');return;}
+    if(!weldStart){weldStart=hit;toast('Сварка: укажите вторую точку');}
+    else{
+      await post('weld',{aObj:weldStart.o.id,aPort:weldStart.p,bObj:hit.o.id,bPort:hit.p,type:'ELECTRICAL'});
+      weldStart=null;tool=null;btnState();await refresh();
+    }
+    return;
+  }
+  // select / move
+  const o=hitObj(wx,wy);
+  sel=o?o.id:null; renderProps(); draw();
+  if(o){
+    const onmove=async ev=>{
+      const [nx,ny]=S2W(ev.offsetX,ev.offsetY);
+      await post('move',{id:o.id,x:nx,y:ny}); refresh(false);
+    };
+    const onup=()=>{window.removeEventListener('mousemove',onmove);window.removeEventListener('mouseup',onup);};
+    window.addEventListener('mousemove',onmove);window.addEventListener('mouseup',onup);
+  }
+}
+function hitObj(wx,wy){
+  for(let i=state.objects.length-1;i>=0;i--){const o=state.objects[i];
+    if(o.kind==='COMPONENT'&&Math.abs(wx-o.x)<o.width/2+0.01&&Math.abs(wy-o.y)<o.height/2+0.01)return o;}
+  return null;
+}
+function hitPort(wx,wy){
+  let best=null,bd=0.03;
+  for(const o of state.objects)for(const p of portsOf(o)){
+    const d=Math.hypot(wx-p[0],wy-p[1]);
+    if(d<bd){bd=d;best={o,p:p[2]};}
+  }
+  return best;
+}
+function startWire(){tool=tool==='wire'?null:'wire';wireStart=null;btnState();toast(tool?'Провод: клик — начало':'');}
+function startWeld(){tool=tool==='weld'?null:'weld';weldStart=null;btnState();toast(tool?'Сварка: кликните по двум точкам подключения':'');}
+function btnState(){document.getElementById('wireBtn').style.borderColor=tool==='wire'?'#4da3ff':'';document.getElementById('weldBtn').style.borderColor=tool==='weld'?'#4da3ff':'';}
+async function cutSelected(){
+  if(!sel)return;
+  const c=state.connections.find(k=>k.aObj===sel||k.bObj===sel);
+  if(c){await post('cut',{id:c.id});await refresh();}else toast('У объекта нет соединений');
+}
+async function addComp(){
+  const t=document.getElementById('compSel').value;
+  const [wx,wy]=[cam.x,cam.y];
+  await post('add',{typeId:t,x:wx,y:wy});
+  await refresh();
+}
+async function loadPreset(){
+  const f=document.getElementById('presetSel').value;
+  await post('preset/load',{file:f});await refresh();toast('Пресет загружен');
+}
+async function validate(){
+  const r=await apiPath('validate').then(x=>x.json());
+  const el=document.getElementById('issues');
+  el.innerHTML=r.issues.length?r.issues.map(i=>'<div class="'+(i.severity==='ERROR'?'err':i.severity==='WARNING'?'warn':'')+'">'+i.message+'</div>').join(''):'<div class="ok">Ошибок не найдено ✔</div>';
+}
+async function saveProject(){
+  const doc=await apiPath('project').then(x=>x.text());
+  const blob=new Blob([doc],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='project.mlab.json';a.click();
+}
+function renderProps(){
+  const el=document.getElementById('props');
+  const o=sel?obj(sel):null;
+  if(!o){el.textContent='— выберите объект —';return;}
+  let h='<h3>'+(o.name||o.typeId)+' <small>'+o.id+'</small></h3>';
+  h+='<div class="prop"><span>x</span><b>'+o.x.toFixed(3)+'</b></div>';
+  h+='<div class="prop"><span>y</span><b>'+o.y.toFixed(3)+'</b></div>';
+  h+='<div class="prop"><span>поворот</span><b>'+(o.rotation*180/Math.PI).toFixed(1)+'°</b></div>';
+  h+='<div class="prop"><span>материал</span><b>'+(materialsById[o.material]?.name||o.material)+'</b></div>';
+  if(o.state)for(const k of ['current','voltage','temperature','brightness','torque'])
+    if(o.state[k]!==undefined&&Math.abs(o.state[k])>1e-6)
+      h+='<div class="prop"><span>'+k+'</span><b>'+(+o.state[k]).toFixed(4)+'</b></div>';
+  if(o.kind==='COMPONENT'&&['switch'].includes(o.typeId))
+    h+='<button onclick="toggleSwitch(\''+o.id+'\','+((o.state&&o.state.closed>0.5)?0:1)+')">Вкл/выкл</button>';
+  el.innerHTML=h;
+}
+async function toggleSwitch(id,val){await post('move',{id}); // touch
+  // set param via project PUT would be heavy; use dedicated approach later (phase B)
+  toast('Переключение — в фазе B API params');
+}
+let materialsById={},componentsById={};
+async function refresh(full){
+  state=await apiPath('state').then(r=>r.json());
+  if(full!==false){
+    const mats=await apiPath('materials').then(r=>r.json());
+    materialsById={};mats.materials.forEach(m=>materialsById[m.id]=m);
+    const comps=await apiPath('components').then(r=>r.json());
+    componentsById={};
+    comps.components.forEach(c=>{componentsById[c.id]={ports:(c.ports||[]).map(pid=>{
+      const [id,tp]=pid.split(':');const def=PORT_POS[c.id];
+      const idx=(c.ports||[]).indexOf(pid);
+      const pp=def&&def[idx]?def[idx]:[0,0];
+      return {id,lx:pp[0],ly:pp[1],type:tp};})};});
+    const cs=document.getElementById('compSel');
+    if(!cs.options.length)comps.components.filter(c=>!['wire','rope'].includes(c.id)).forEach(c=>{const o=document.createElement('option');o.value=c.id;o.textContent=c.name;cs.appendChild(o);});
+    document.getElementById('matList').innerHTML=mats.materials.map(m=>'<div class="item" title="'+m.name+'">'+m.name+' · ρ='+m.density+'</div>').join('');
+    const ps=document.getElementById('presetSel');
+    if(!ps.options.length){const prs=await apiPath('presets').then(r=>r.json());prs.forEach(p=>{const o=document.createElement('option');o.value=p.file;o.textContent=p.name.replace(/\.json$/,'');ps.appendChild(o);});}
+  }
+  document.getElementById('objList').innerHTML=state.objects.map(o=>'<div class="item '+(o.id===sel?'sel':'')+'" onclick="sel=\''+o.id+'\';renderProps();draw()">'+(o.name||o.typeId)+'</div>').join('');
+  document.getElementById('modeLbl').textContent='Режим: '+state.mode;
+  document.getElementById('modeLbl').className=state.mode==='RUNNING'?'ok':state.mode==='PAUSED'?'warn':'';
+  document.getElementById('tLbl').textContent='t = '+state.time.toFixed(2)+' с · tick '+state.tick;
+  document.getElementById('log').innerHTML=(state.log||[]).slice().reverse().map(l=>'<div>'+l+'</div>').join('');
+  renderProps();draw();
+}
+function toast(m){if(m)document.getElementById('coord').textContent=m;}
+document.addEventListener('keydown',e=>{
+  if(e.key==='Delete'&&sel){post('remove',{id:sel});sel=null;refresh();}
+  if(e.key===' '){e.preventDefault();api(state.mode==='RUNNING'?'sim/pause':'sim/start').then(refresh);}
+});
+setInterval(()=>refresh(false),250);
+refresh();
+</script>
+</body>
+</html>
