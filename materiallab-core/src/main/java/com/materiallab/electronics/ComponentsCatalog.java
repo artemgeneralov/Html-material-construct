@@ -60,8 +60,8 @@ public final class ComponentsCatalog {
         mechanicalBlocks();
     }
 
-    private void src(String id, String ru, String desc, double v, double mass) {
-        ComponentDef d = base(id, ru, desc, "power");
+    private void src(String id, String ru, String desc, String category, double v, double mass) {
+        ComponentDef d = base(id, ru, desc, category);
         d.ports.add(new PortDef("v+", "Плюс", ConnectionType.ELECTRICAL, -0.04, 0.0));
         d.ports.add(new PortDef("gnd", "Минус", ConnectionType.ELECTRICAL, 0.04, 0.0));
         d.defaultParams.put("voltage", v);
@@ -69,8 +69,8 @@ public final class ComponentsCatalog {
         d.hasGround = true; d.massKg = mass; d.materialId = "steel";
     }
 
-    private void twoPin(String id, String ru, String desc, double r, double mass) {
-        ComponentDef d = base(id, ru, desc, categoryOf(id));
+    private void twoPin(String id, String ru, String desc, String category, double r, double mass) {
+        ComponentDef d = base(id, ru, desc, category);
         d.ports.add(new PortDef("p1", "Вывод 1", ConnectionType.ELECTRICAL, -0.05, 0.0));
         d.ports.add(new PortDef("p2", "Вывод 2", ConnectionType.ELECTRICAL, 0.05, 0.0));
         if (!id.equals("generator")) d.defaultParams.put("resistance", r);

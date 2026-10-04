@@ -28,6 +28,12 @@ public final class SnapshotAction implements Action {
         return new SnapshotAction(target, beforeState, ProjectSerializer.copy(target), description);
     }
 
+    /** Build a finished action from explicit snapshots (used for drag gestures
+     *  where 'before' is captured at gesture start and 'after' at gesture end). */
+    public static SnapshotAction of(ProjectData target, ProjectData before, ProjectData after, String description) {
+        return new SnapshotAction(target, before, after, description);
+    }
+
     @Override public void redo() { replaceWith(afterState != null ? afterState : target); }
     @Override public void undo() { replaceWith(beforeState); }
     @Override public String describe() { return description; }

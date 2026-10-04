@@ -1,2 +1,2 @@
-# Maven wrapper / local distribution
-.mvn-dist/
+# Maven build artifacts
+target/
