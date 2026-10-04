@@ -12,6 +12,15 @@ public final class RopeSegmentChain {
     public final List<Vec2> nodes = new ArrayList<>();
     public final List<DistanceConstraint> links = new ArrayList<>();
     private final List<PhysicsBody> bodies = new ArrayList<>();
+    private PhysicsBody pinnedA, pinnedB;   // welded endpoints follow their parent body
+
+    /** Attach a chain endpoint to a dynamic body's world anchor (welded wire/rope). */
+    public void pinEnd(boolean start, PhysicsBody parent, Vec2 local) {
+        PhysicsBody stubNode = start ? bodies.get(0) : bodies.get(bodies.size() - 1);
+        if (start) pinnedA = parent; else pinnedB = parent;
+        stubNode.fixedLocal = local;
+        stubNode.followParent = parent;
+    }
 
     public RopeSegmentChain(ProjectObject owner, int segments) {
         this.owner = owner;
@@ -38,9 +47,17 @@ public final class RopeSegmentChain {
 
     public void step(double gravity, double dt, double drag) {
         for (PhysicsBody b : bodies) {
+            if (b.followParent != null) continue;   // welded endpoint: driven by parent below
             b.velocity.y -= gravity * dt;
             b.velocity = b.velocity.mul(Math.max(0, 1 - drag * dt));
             b.owner.pos = b.owner.pos.add(b.velocity.mul(dt));
+        }
+        // drive welded endpoints from their parent body's world anchor
+        if (pinnedA != null && !bodies.isEmpty())
+            bodies.get(0).owner.pos = Constraint.world(pinnedA, bodies.get(0).fixedLocal);
+        if (pinnedB != null && !bodies.isEmpty()) {
+            PhysicsBody last = bodies.get(bodies.size() - 1);
+            last.owner.pos = Constraint.world(pinnedB, last.fixedLocal);
         }
         for (int it = 0; it < 4; it++)
             for (DistanceConstraint c : links) c.solve(dt);

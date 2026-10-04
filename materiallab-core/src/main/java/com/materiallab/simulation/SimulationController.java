@@ -23,6 +23,7 @@ public final class SimulationController {
 
     private final ProjectData source;
     private ProjectData runtime;
+    private ProjectData baseline;   // snapshot taken at start(): target of resetRuntime()
     private final PhysicsEngine physics = new PhysicsEngine();
     private final ElectricalSolver solver = new ElectricalSolver();
     private final Map<String, ComponentBehavior> behaviors = Behaviors.createAll();
@@ -44,7 +45,12 @@ public final class SimulationController {
     public PhysicsEngine physics() { return physics; }
 
     public void start() {
-        resetRuntime();
+        // Preserve the current document as the simulation baseline (objects keep
+        // the positions the user placed them at), instead of resetting to a copy.
+        runtime = ProjectSerializer.copy(source);
+        baseline = ProjectSerializer.copy(runtime);
+        time = 0; tickCount = 0;
+        physics.reset(runtime);
         mode = Mode.RUNNING;
         log.add("Симуляция запущена");
     }
@@ -64,14 +70,16 @@ public final class SimulationController {
 
     /** Advance exactly one tick — used for step-by-step debugging (spec 3). */
     public void stepOnce() {
-        if (mode == Mode.STOPPED) resetRuntime();
-        mode = Mode.PAUSED;
+        if (mode == Mode.STOPPED) start();   // first step begins the run baseline
+        else mode = Mode.PAUSED;
         tick();
         log.add(String.format("Шаг #%d, t=%.3f с", tickCount, time));
     }
 
+    /** Reset to the state captured when the current run was started. */
     public void resetRuntime() {
-        runtime = ProjectSerializer.copy(source);
+        runtime = baseline != null ? ProjectSerializer.copy(baseline)
+                                   : ProjectSerializer.copy(source);
         time = 0; tickCount = 0;
         physics.reset(runtime);
         log.add("Сброс симуляции");

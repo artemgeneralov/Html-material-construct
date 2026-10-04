@@ -55,6 +55,17 @@ public final class PhysicsEngine {
             Vec2 la = localAnchor(ba.owner, c.aPort), lb = localAnchor(bb.owner, c.bPort);
             Constraint con;
             ProjectObject ao = ba.owner, bo = bb.owner;
+            // Welded wire/rope endpoint: pin the chain node to the component port (spec 7/9).
+            if (ao.kind == BodyKind.WIRE || ao.kind == BodyKind.ROPE) {
+                for (RopeSegmentChain ch : chains)
+                    if (ch.owner == ao) ch.pinEnd(portIsStart(ao, c.aPort), bb, localAnchor(bo, c.bPort));
+            }
+            if (bo.kind == BodyKind.WIRE || bo.kind == BodyKind.ROPE) {
+                for (RopeSegmentChain ch : chains)
+                    if (ch.owner == bo) ch.pinEnd(portIsStart(bo, c.bPort), ba, localAnchor(ao, c.aPort));
+            }
+            if (ao.kind == BodyKind.WIRE || ao.kind == BodyKind.ROPE
+                || bo.kind == BodyKind.WIRE || bo.kind == BodyKind.ROPE) continue; // no rigid body constraint needed
             if (isSpring(ao) || isSpring(bo)) {
                 DistanceConstraint dc = new DistanceConstraint(ba, bb, la, lb,
                         ao.param("restLength", worldDist(ba, la, bb, lb)), false);
@@ -77,17 +88,37 @@ public final class PhysicsEngine {
         SimulationSettings s = p.simulation;
         List<ProjectObject> objs = new ArrayList<>();
         for (ProjectObject o : p.objects) if (o.kind == BodyKind.COMPONENT) objs.add(o);
+        // 1) integrate velocities of free bodies
         for (ProjectObject o : objs) {
             PhysicsBody b = bodies.get(o.id);
             if (b == null || b.fixed) continue;
             b.velocity.y -= s.gravity * dt;
             b.velocity = b.velocity.mul(Math.max(0, 1 - s.airDrag * dt));
-            o.pos = o.pos.add(b.velocity.mul(dt));
-            o.rotation += b.angularVelocity * dt;
             Double tq = o.state.get("torque");
             if (tq != null && Math.abs(tq) > 1e-9)
                 b.angularVelocity += tq / b.inertia * dt * 0.02; // scaled for stability
+            o.rotation += b.angularVelocity * dt;
         }
+        // 2) drive bodies welded to a fixed anchor (anchor block / fixed object):
+        //    the anchored side wins, the other body follows its world anchor.
+        for (Constraint c : constraints) {
+            if (c.broken) continue;
+            boolean af = c.a.fixed, bf = c.b.fixed;
+            if (af == bf) continue;
+            PhysicsBody fixedB = af ? c.a : c.b, freeB = af ? c.b : c.a;
+            Vec2 target = Constraint.world(fixedB, af ? c.anchorA : c.anchorB);
+            Vec2 cur = Constraint.world(freeB, af ? c.anchorB : c.anchorA);
+            Vec2 delta = target.sub(cur);
+            freeB.owner.pos = freeB.owner.pos.add(delta);
+            if (freeB.velocity.len() < 1e-3) freeB.velocity = new Vec2();
+        }
+        // 3) move free bodies by velocity AFTER anchoring, so anchors hold
+        for (ProjectObject o : objs) {
+            PhysicsBody b = bodies.get(o.id);
+            if (b == null || b.fixed) continue;
+            o.pos = o.pos.add(b.velocity.mul(dt));
+        }
+        // 4) iterative constraint solving + breakage detection
         for (int it = 0; it < 6; it++)
             for (Constraint c : constraints) c.solve(dt);
         detectBroken();
@@ -177,6 +208,10 @@ public final class PhysicsEngine {
     }
     private static boolean isSpring(ProjectObject o) { return "spring".equals(o.typeId); }
     private static boolean isHinge(ProjectObject o) { return "hinge".equals(o.typeId); }
+    /** Wire/rope endpoint port id -> is it the start of the polyline? */
+    private static boolean portIsStart(ProjectObject wireOrRope, String portId) {
+        return !"b".equals(portId);   // endpoints are "a" (start) and "b" (end)
+    }
 
     private static double density(ProjectObject o) {
         return MaterialsRegistry.get().get(o.materialId).density;

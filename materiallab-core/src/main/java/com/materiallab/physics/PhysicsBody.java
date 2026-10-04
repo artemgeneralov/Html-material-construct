@@ -12,6 +12,9 @@ public final class PhysicsBody {
     public double inertia;
     public boolean fixed;
     public double temperature = 20;   // Celsius, simplified lumped model
+    /** Rope/wire chain node welded to a parent body: position is driven by it. */
+    public PhysicsBody followParent;
+    public Vec2 fixedLocal = new Vec2();
 
     public PhysicsBody(ProjectObject owner, double mass, double inertia, boolean fixed) {
         this.owner = owner; this.mass = mass; this.inertia = inertia; this.fixed = fixed;

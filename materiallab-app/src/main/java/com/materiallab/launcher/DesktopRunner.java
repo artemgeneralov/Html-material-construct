@@ -16,6 +16,7 @@ import com.materiallab.storage.ProjectStorage;
 import com.materiallab.undo.SnapshotAction;
 import com.materiallab.undo.UndoManager;
 import com.materiallab.validation.ProjectValidator;
+import java.util.ArrayList;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.datatransfer.Clipboard;
@@ -49,8 +50,13 @@ public final class DesktopRunner {
     private String tool = "cursor";
     private Vec2 pendingPoint;          // wire/weld/measure first point
     private ProjectObject selected;
+    private final java.util.Set<ProjectObject> selection = new java.util.LinkedHashSet<>();
     private String measureA, measureB;
+    private double[] measurePts;        // world coords of last measurement (for drawing)
     private Clipboard kb;   // system clipboard, created lazily (headless-safe)
+    private JComboBox<String> compPicker;      // toolbar component selector
+    private DefaultComboBoxModel<String> matModel;
+    private JList<String> objJList;
 
     private enum ViewMode { EDIT, SIMULATE, READONLY }
     private ViewMode viewMode = ViewMode.EDIT;
@@ -105,9 +111,11 @@ public final class DesktopRunner {
         else refreshAll();
 
         uiTimer = new javax.swing.Timer(33, e -> {
-            if (sim.mode() == SimulationController.Mode.RUNNING && viewMode == ViewMode.SIMULATE) {
+            if (sim.mode() == SimulationController.Mode.RUNNING) {
                 sim.tick();
+                sim.applyPositionsToSource();   // show motion on the canvas
                 updateStatus();
+                renderProps();                  // live voltage/current/temperature
             }
             canvas.repaint();
         });
@@ -141,16 +149,22 @@ public final class DesktopRunner {
         view.add(item("Привязка к сетке", e -> { snapGrid = !snapGrid; project.grid.snap = snapGrid; }));
         JMenu simM = new JMenu("Симуляция");
         simM.add(item("Запуск (F5)", e -> startSim()));
-        simM.add(item("Пауза (F6)", e -> sim.pause()));
+        simM.add(item("Пауза (F6)", e -> { sim.pause(); modeLabel.setText("Режим: симуляция (ПАУЗА)"); }));
         simM.add(item("Шаг (F7)", e -> { sim.stepOnce(); enterSimView(); }));
         simM.add(item("Стоп (F8)", e -> stopSim()));
         simM.add(item("Сброс (Ctrl+F5)", e -> { sim.resetRuntime(); enterSimView(); }));
         JMenu tools = new JMenu("Инструменты");
+        ButtonGroup toolGroup = new ButtonGroup();
         for (String[] t : new String[][]{
-            {"Курсор", "cursor"}, {"Провод", "wire"}, {"Верёвка", "rope"}, {"Сварка", "weld"},
-            {"Разварить", "cut"}, {"Шарнир", "hinge"}, {"Жёсткое соединение", "stiff"},
+            {"Курсор", "cursor"}, {"Перемещение", "move"}, {"Вращение", "rotate"}, {"Масштаб", "scale"},
+            {"Провод", "wire"}, {"Верёвка", "rope"}, {"Сварка", "weld"},
+            {"Разварить", "cut"}, {"Разрезать провод", "cutwire"}, {"Шарнир", "hinge"},
+            {"Жёсткое соединение", "stiff"},
             {"Пружина", "spring"}, {"Крепление", "anchor"}, {"Измерение", "measure"}}) {
-            tools.add(item(t[0], e -> setTool(t[1])));
+            JRadioButtonMenuItem mi = new JRadioButtonMenuItem(t[0], t[1].equals("cursor"));
+            mi.addActionListener(e -> setTool(t[1]));
+            toolGroup.add(mi);
+            tools.add(mi);
         }
         JMenu check = new JMenu("Проверка");
         check.add(item("Проверить схему (Ctrl+B)", e -> validate()));
@@ -174,12 +188,12 @@ public final class DesktopRunner {
     private JPanel buildToolbar() {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         p.setBackground(new Color(0x262b34));
-        JComboBox<String> comps = new JComboBox<>();
+        compPicker = new JComboBox<>();
         for (ComponentDef d : com.materiallab.electronics.ComponentsCatalog.get().all())
-            comps.addItem(d.id + " — " + d.nameRu);
+            compPicker.addItem(d.id + " — " + d.nameRu);
         JButton addBtn = new JButton("+ Компонент");
         addBtn.addActionListener(e -> {
-            String sel2 = (String) comps.getSelectedItem();
+            String sel2 = (String) compPicker.getSelectedItem();
             if (sel2 == null) return;
             String id = sel2.split(" — ")[0];
             ComponentDef def = com.materiallab.electronics.ComponentsCatalog.get().get(id);
@@ -188,7 +202,7 @@ public final class DesktopRunner {
         JButton presetBtn = new JButton("Пресет…");
         presetBtn.addActionListener(e -> choosePreset());
         JButton play = new JButton("▶ Пуск"); play.addActionListener(e -> startSim());
-        JButton pause = new JButton("⏸ Пауза"); pause.addActionListener(e -> sim.pause());
+        JButton pause = new JButton("⏸ Пауза"); pause.addActionListener(e -> { sim.pause(); modeLabel.setText("Режим: симуляция (ПАУЗА)"); });
         JButton step = new JButton("⏭ Шаг"); step.addActionListener(e -> { sim.stepOnce(); enterSimView(); });
         JButton stop = new JButton("⏹ Стоп"); stop.addActionListener(e -> stopSim());
         JButton editMode = new JButton("✎ Редактирование");
@@ -198,7 +212,7 @@ public final class DesktopRunner {
         JButton validateBtn = new JButton("✓ Проверка"); validateBtn.addActionListener(e -> validate());
         JButton saveBtn = new JButton("💾 Сохранить"); saveBtn.addActionListener(e -> saveProject());
         JButton openBtn = new JButton("📂 Открыть"); openBtn.addActionListener(e -> chooseOpen());
-        p.add(comps);
+        p.add(compPicker);
         for (JButton b : new JButton[]{addBtn, presetBtn, play, pause, step, stop, editMode, roMode, validateBtn, saveBtn, openBtn}) {
             b.setForeground(new Color(0xdfe4ea));
             b.setBackground(new Color(0x323947));
@@ -211,24 +225,32 @@ public final class DesktopRunner {
 
     private JScrollPane buildLeftPanel() {
         objList = new DefaultListModel<>();
-        JList<String> list = new JList<>(objList);
-        list.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        objJList = new JList<>(objList);
+        objJList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        JList<String> list = objJList;
         list.addListSelectionListener(e -> {
-            int i = list.getSelectedIndex();
-            if (i >= 0 && i < project.objects.size()) { select(project.objects.get(i)); }
+            if (e.getValueIsAdjusting()) return;
+            java.util.List<ProjectObject> picked = new ArrayList<>();
+            for (int i : list.getSelectedIndices())
+                if (i >= 0 && i < project.objects.size()) picked.add(project.objects.get(i));
+            selection.clear(); selection.addAll(picked);
+            select(picked.isEmpty() ? null : picked.get(picked.size() - 1));
         });
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(new JLabel(" Объекты проекта:"), BorderLayout.NORTH);
         wrap.add(new JScrollPane(list), BorderLayout.CENTER);
 
-        DefaultComboBoxModel<String> matModel = new DefaultComboBoxModel<>();
+        matModel = new DefaultComboBoxModel<>();
         for (Material m : MaterialsRegistry.get().all().values()) matModel.addElement(m.id + " — " + m.nameRu);
         JComboBox<String> mats = new JComboBox<>(matModel);
         JButton applyMat = new JButton("Назначить материал выбранному");
         applyMat.addActionListener(e -> {
-            if (selected == null) return;
+            if (selection.isEmpty()) return;
             String id = ((String) mats.getSelectedItem()).split(" — ")[0];
-            mutateAndRecord("материал " + id, () -> selected.materialId = id);
+            java.util.Set<ProjectObject> targets = new java.util.LinkedHashSet<>(selection);
+            mutateAndRecord("материал " + id, () -> {
+                for (ProjectObject t : targets) t.materialId = id;
+            });
         });
         JPanel south = new JPanel(new BorderLayout());
         south.add(mats, BorderLayout.NORTH);
@@ -291,63 +313,121 @@ public final class DesktopRunner {
 
     private void select(ProjectObject o) {
         selected = o;
+        if (o != null) { selection.clear(); selection.add(o); syncListSelection(); }
+        else selection.clear();
         renderProps();
         statusLabel.setText("Выбрано: " + (o == null ? "нет" : o.name + " [" + o.id + "]")
             + String.format("  координаты: (%.2f, %.2f) м", o.pos.x, o.pos.y));
     }
 
-    private void deleteSelected() {
-        if (selected == null || viewMode != ViewMode.EDIT) return;
-        String id = selected.id;
-        mutateAndRecord("удалить " + selected.name, () -> project.removeObject(id));
-        selected = null; renderProps();
+    private void syncListSelection() {
+        if (objJList == null) return;
+        int[] idx = new int[selection.size()];
+        int k = 0;
+        for (ProjectObject o : selection) {
+            int i = project.objects.indexOf(o);
+            if (i >= 0) idx[k++] = i;
+        }
+        objJList.setSelectedIndices(idx);
     }
 
+    /** Resolve the LIVE model object for a possibly stale selection reference. */
+    private ProjectObject live(ProjectObject o) {
+        if (o == null) return null;
+        ProjectObject cur = project.byId(o.id);
+        return cur != null ? cur : o;
+    }
+
+    private void deleteSelected() {
+        if (viewMode != ViewMode.EDIT) return;
+        if (selection.isEmpty()) return;
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+        for (ProjectObject o : selection) ids.add(o.id);
+        String nm = selected == null ? "" : selected.name;
+        mutateAndRecord("удалить " + nm, () -> { for (String id : ids) project.removeObject(id); });
+        selection.clear(); selected = null; renderProps();
+    }
+
+    private ProjectData internalClipboard;   // in-app copy buffer (works without system clipboard)
+
     private void copySelection() {
-        if (GraphicsEnvironment.isHeadless()) return;
-        if (kb == null) kb = Toolkit.getDefaultToolkit().getSystemClipboard();
-        if (selected != null)
-            kb.setContents(new StringSelection(ProjectStorage.toJson(singleProject(selected))), null);
+        if (selected == null) return;
+        internalClipboard = singleProject(live(selected));
+        try {
+            if (!GraphicsEnvironment.isHeadless()) {
+                if (kb == null) kb = Toolkit.getDefaultToolkit().getSystemClipboard();
+                kb.setContents(new StringSelection(ProjectStorage.toJson(internalClipboard)), null);
+            }
+        } catch (Exception ignored) { /* internal buffer still holds the copy */ }
+        statusLabel.setText("Скопировано: " + selected.name);
     }
 
     private ProjectData singleProject(ProjectObject o) {
         ProjectData one = ProjectSerializer.copy(project);
         one.objects.clear(); one.connections.clear();
-        one.objects.add(ProjectSerializer.copy(project).byId(o.id));
+        ProjectObject c = one.byId(o.id);
+        if (c != null) one.objects.add(c);
         return one;
     }
 
     private void paste() {
-        if (GraphicsEnvironment.isHeadless()) return;
-        if (kb == null) kb = Toolkit.getDefaultToolkit().getSystemClipboard();
+        ProjectData one = internalClipboard;
+        if (one == null) {
+            try {
+                if (!GraphicsEnvironment.isHeadless()) {
+                    if (kb == null) kb = Toolkit.getDefaultToolkit().getSystemClipboard();
+                    String str = (String) kb.getData(DataFlavor.stringFlavor);
+                    one = ProjectStorage.fromJson(str);
+                }
+            } catch (Exception ignored) {}
+        }
+        if (one == null || one.objects.isEmpty()) {
+            JOptionPane.showMessageDialog(frame, "Нечего вставить — скопируйте объект (Ctrl+C)",
+                "Вставка", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
         try {
-            String s = (String) kb.getData(DataFlavor.stringFlavor);
-            ProjectData one = ProjectStorage.fromJson(s);
-            if (one.objects.isEmpty()) return;
-            ProjectObject src = one.objects.get(0);
-            ProjectObject copy = ProjectSerializer.copy(one).objects.get(0);
-            copy.id = project.newId(src.typeId);
-            copy.pos = new Vec2(src.pos.x + 0.05, src.pos.y - 0.05);
-            mutateAndRecord("вставить " + copy.name, () -> project.addObject(copy));
-            select(copy);
+            ProjectData dup = ProjectSerializer.copy(one);
+            java.util.List<ProjectObject> added = new ArrayList<>();
+            for (ProjectObject src : dup.objects) {
+                src.id = project.newId(src.typeId);
+                src.pos = new Vec2(src.pos.x + 0.05, src.pos.y - 0.05);
+                if (src.points != null)
+                    for (Vec2 pt : src.points) pt.set(pt.x + 0.05, pt.y - 0.05);
+                added.add(src);
+            }
+            dup.connections.clear();
+            mutateAndRecord("вставить " + added.size(), () -> { for (var o : added) project.addObject(o); });
+            if (!added.isEmpty()) select(added.get(0));
         } catch (Exception ex) {
-            JOptionPane.showMessageDialog(frame, "Буфер обмена не содержит объекта .mlab", "Вставка", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(frame, "Ошибка вставки: " + ex.getMessage(), "Вставка", JOptionPane.WARNING_MESSAGE);
         }
     }
 
     private void doUndo() {
         String d = undo.undo();
-        if (d != null) { sim = new SimulationController(project); refreshAll(); statusLabel.setText("Отменено: " + d); }
+        if (d != null) {
+            sim = new SimulationController(project);
+            if (selected != null) selected = project.byId(selected.id);
+            selection.clear();
+            refreshAll(); statusLabel.setText("Отменено: " + d);
+        }
         canvas.repaint();
     }
 
     private void doRedo() {
         String d = undo.redo();
-        if (d != null) { sim = new SimulationController(project); refreshAll(); statusLabel.setText("Повтор: " + d); }
+        if (d != null) {
+            sim = new SimulationController(project);
+            if (selected != null) selected = project.byId(selected.id);
+            selection.clear();
+            refreshAll(); statusLabel.setText("Повтор: " + d);
+        }
         canvas.repaint();
     }
 
     private void startSim() {
+        if (sim.mode() == SimulationController.Mode.PAUSED) { sim.resume(); enterSimView(); return; }
         sim.start();          // physics is stepped by the UI timer loop below
         enterSimView();       // (SimulationController owns all simulation state)
     }
@@ -483,30 +563,183 @@ public final class DesktopRunner {
     }
 
     private void renderProps() {
+        final ProjectObject o = selected == null ? null : live(selected);
         propsPanel.removeAll();
         propsPanel.setLayout(new BoxLayout(propsPanel, BoxLayout.Y_AXIS));
-        if (selected == null) {
+        if (o == null) {
             propsPanel.add(new JLabel("— выберите объект —"));
         } else {
-            propsPanel.add(new JLabel("Имя: " + selected.name));
-            propsPanel.add(new JLabel("Тип: " + selected.typeId + " (" + selected.kind + ")"));
-            propsPanel.add(new JLabel("Материал: " + selected.materialId));
-            propsPanel.add(new JLabel(String.format("Позиция: (%.3f, %.3f) м", selected.pos.x, selected.pos.y)));
-            propsPanel.add(new JLabel(String.format("Поворот: %.1°", Math.toDegrees(selected.rotation))));
-            propsPanel.add(new JLabel(String.format("Размер: %.3f × %.3f м", selected.width, selected.height)));
-            propsPanel.add(new JLabel("Масса: " + selected.mass() + " кг"));
+            boolean editing = viewMode == ViewMode.EDIT;
+            JPanel head = new JPanel(new BorderLayout(4, 0));
+            head.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+            head.add(new JLabel("Имя:"), BorderLayout.WEST);
+            JTextField nameField = new JTextField(o.name);
+            nameField.setEnabled(editing);
+            nameField.addActionListener(e -> {
+                String v = nameField.getText().trim();
+                if (!v.isEmpty() && !v.equals(o.name)) mutateAndRecord("имя", () -> live(o).name = v);
+            });
+            head.add(nameField, BorderLayout.CENTER);
+            propsPanel.add(head);
+            propsPanel.add(new JLabel("Тип: " + o.typeId + " (" + o.kind + ")"));
+            // material combo
+            JPanel matRow = new JPanel(new BorderLayout(4, 0));
+            matRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+            matRow.add(new JLabel("Материал:"), BorderLayout.WEST);
+            JComboBox<String> matBox = new JComboBox<>(matModel);
+            matBox.setSelectedItem(findMatItem(o.materialId));
+            matBox.setEnabled(editing);
+            matBox.addActionListener(e -> {
+                Object sel = matBox.getSelectedItem();
+                if (sel == null) return;
+                String id = ((String) sel).split(" — ")[0];
+                if (!id.equals(live(o).materialId))
+                    mutateAndRecord("материал " + id, () -> live(o).materialId = id);
+            });
+            matRow.add(matBox, BorderLayout.CENTER);
+            propsPanel.add(matRow);
+            // position fields
+            JPanel posRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            posRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+            posRow.add(new JLabel("X, м:"));
+            JSpinner xs = new JSpinner(new SpinnerNumberModel(round3(o.pos.x), -1000.0, 1000.0, 0.01));
+            xs.setEnabled(editing); xs.setPreferredSize(new Dimension(70, 26));
+            posRow.add(xs);
+            posRow.add(new JLabel("Y, м:"));
+            JSpinner ys = new JSpinner(new SpinnerNumberModel(round3(o.pos.y), -1000.0, 1000.0, 0.01));
+            ys.setEnabled(editing); ys.setPreferredSize(new Dimension(70, 26));
+            posRow.add(ys);
+            xs.addChangeListener(e -> applyPos(o, (Double) xs.getValue(), round3(live(o).pos.y)));
+            ys.addChangeListener(e -> applyPos(o, round3(live(o).pos.x), (Double) ys.getValue()));
+            propsPanel.add(posRow);
+            // rotation & size
+            JPanel rotRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            rotRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+            rotRow.add(new JLabel("Поворот, °:"));
+            JSpinner rotS = new JSpinner(new SpinnerNumberModel(
+                Math.round(Math.toDegrees(o.rotation)) % 360, -3600, 3600, 5));
+            rotS.setEnabled(editing); rotS.setPreferredSize(new Dimension(70, 26));
+            rotS.addChangeListener(e -> {
+                double rad = Math.toRadians((Integer) rotS.getValue());
+                ProjectObject t = live(o);
+                if (Math.abs(t.rotation - rad) > 1e-9) mutateAndRecord("поворот", () -> live(o).rotation = rad);
+            });
+            rotRow.add(rotS);
+            JButton rotBtn = new JButton("+15°");
+            rotBtn.setEnabled(editing);
+            rotBtn.addActionListener(e -> mutateAndRecord("поворот 15°", () -> live(o).rotation += Math.toRadians(15)));
+            rotRow.add(rotBtn);
+            JButton flip = new JButton("Отразить X");
+            flip.setEnabled(editing);
+            flip.addActionListener(e -> mutateAndRecord("отражение", () -> {
+                ProjectObject t = live(o); t.pos.x = 2 * camX - t.pos.x;
+            }));
+            rotRow.add(flip);
+            propsPanel.add(rotRow);
+            JPanel sizeRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            sizeRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+            sizeRow.add(new JLabel("Ш×В, м:"));
+            JSpinner ws = new JSpinner(new SpinnerNumberModel(round3(o.width), 0.005, 100, 0.005));
+            ws.setEnabled(editing); ws.setPreferredSize(new Dimension(70, 26));
+            JSpinner hs = new JSpinner(new SpinnerNumberModel(round3(o.height), 0.005, 100, 0.005));
+            hs.setEnabled(editing); hs.setPreferredSize(new Dimension(70, 26));
+            ws.addChangeListener(e -> mutateAndRecord("ширина", () -> live(o).width = (Double) ws.getValue()));
+            hs.addChangeListener(e -> mutateAndRecord("высота", () -> live(o).height = (Double) hs.getValue()));
+            sizeRow.add(ws); sizeRow.add(hs);
+            propsPanel.add(sizeRow);
+            JCheckBox fixedChk = new JCheckBox("Закреплён (не падает)", o.fixed);
+            fixedChk.setEnabled(editing);
+            fixedChk.addActionListener(e -> mutateAndRecord("закрепление", () -> live(o).fixed = fixedChk.isSelected()));
+            propsPanel.add(fixedChk);
+            propsPanel.add(new JLabel("Масса: " + o.mass() + " кг"));
+            // ---- parameters: editable spinners ----
             propsPanel.add(new JLabel("--- Параметры ---"));
-            selected.params.forEach((k, v) -> propsPanel.add(new JLabel(k + " = " + v)));
+            java.util.List<String> keys = new ArrayList<>(o.params.keySet());
+            if (keys.isEmpty()) propsPanel.add(new JLabel("(нет параметров)"));
+            for (String k : keys) {
+                JPanel row = new JPanel(new BorderLayout(4, 0));
+                row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+                row.add(new JLabel(k + ":"), BorderLayout.WEST);
+                JSpinner sp = new JSpinner(new SpinnerNumberModel(o.params.get(k), -1e12, 1e12, stepFor(k, o.params.get(k))));
+                sp.setEnabled(editing);
+                sp.setPreferredSize(new Dimension(110, 26));
+                final String key = k;
+                sp.addChangeListener(e -> {
+                    ProjectObject t = live(o);
+                    if (t == null) return;
+                    double nv = ((Number) sp.getValue()).doubleValue();
+                    Double cur = t.params.get(key);
+                    if (cur == null || Math.abs(cur - nv) > 1e-12)
+                        mutateAndRecord(key + " = " + nv, () -> { ProjectObject u = live(o); if (u != null) u.params.put(key, nv); });
+                });
+                row.add(sp, BorderLayout.EAST);
+                propsPanel.add(row);
+            }
+            // quick toggles for common interactive params
+            if (o.params.containsKey("on")) {
+                JButton tog = new JButton(o.param("on", 0) > 0.5 ? "Выключить" : "Включить");
+                tog.addActionListener(e -> mutateAndRecord("переключатель", () -> {
+                    ProjectObject t = live(o); t.params.put("on", t.param("on", 0) > 0.5 ? 0.0 : 1.0);
+                }));
+                propsPanel.add(tog);
+            }
+            if (o.typeId.equals("button")) {
+                JButton press = new JButton("Удерживать нажатым (замкнуть)");
+                press.addActionListener(e -> {
+                    ProjectObject t = live(o);
+                    t.state.put("press", t.state.getOrDefault("press", 0.0) > 0.5 ? 0.0 : 1.0);
+                    statusLabel.setText("Кнопка: " + (t.state.get("press") > 0.5 ? "замкнута" : "разомкнута"));
+                    canvas.repaint();
+                });
+                propsPanel.add(press);
+            }
+            // ---- runtime state (live during simulation) ----
             propsPanel.add(new JLabel("--- Состояние ---"));
-            selected.state.forEach((k, v) -> propsPanel.add(new JLabel(k + " = " + v)));
-            JButton rotBtn = new JButton("Повернуть на 15°");
-            rotBtn.addActionListener(e -> mutateAndRecord("поворот", () -> selected.rotation += Math.toRadians(15)));
-            propsPanel.add(rotBtn);
-            JButton flip = new JButton("Отразить по X");
-            flip.addActionListener(e -> mutateAndRecord("отражение", () -> selected.pos.x = 2 * camX - selected.pos.x));
-            propsPanel.add(flip);
+            if (o.state.isEmpty()) propsPanel.add(new JLabel("(нет данных — запустите симуляцию)"));
+            for (Map.Entry<String, Double> en : o.state.entrySet())
+                propsPanel.add(new JLabel(en.getKey() + " = " + fmtVal(en.getValue())));
         }
         propsPanel.revalidate();
+        propsPanel.repaint();
+    }
+
+    private static String findMatItem(String materialId) {
+        for (int i = 0; i < matModel.getSize(); i++) {
+            String it = matModel.getElementAt(i);
+            if (it.split(" — ")[0].equals(materialId)) return it;
+        }
+        return null;
+    }
+
+    private void applyPos(ProjectObject o, double x, double y) {
+        ProjectObject t = live(o);
+        if (t == null) return;
+        if (Math.abs(t.pos.x - x) < 1e-9 && Math.abs(t.pos.y - y) < 1e-9) return;
+        Vec2 oldP = t.pos.copy();
+        java.util.List<Vec2> oldPts = t.points == null ? null
+            : t.points.stream().map(Vec2::copy).collect(java.util.stream.Collectors.toList());
+        double dx = x - t.pos.x, dy = y - t.pos.y;
+        mutateAndRecord("позиция", () -> {
+            ProjectObject u = live(o);
+            if (u == null) return;
+            u.pos.set(x, y);
+            if (u.points != null && oldPts != null)
+                for (Vec2 p : u.points) p.set(p.x + dx, p.y + dy);
+        });
+    }
+
+    private static double round3(double v) { return Math.round(v * 1000.0) / 1000.0; }
+
+    private static double stepFor(String key, double cur) {
+        if (key.toLowerCase().contains("voltage")) return 0.1;
+        if (key.toLowerCase().contains("resistance")) return cur >= 100 ? 10 : 0.1;
+        double a = Math.abs(cur);
+        if (a >= 100) return 1; if (a >= 1) return 0.1; return 0.01;
+    }
+
+    private static String fmtVal(double v) {
+        if (Math.abs(v) >= 1e6 || (Math.abs(v) < 1e-3 && v != 0)) return String.format("%.3e", v);
+        return String.format("%.4g", v);
     }
 
     private void updateStatus() {
