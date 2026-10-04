@@ -41,6 +41,12 @@ public final class ElectricalSolver {
     /** Path conductance above this (Siemens) => current > ~8A per volt => short. */
     public static final double SHORT_CONDUCTANCE_LIMIT = 8.0;
 
+    /**
+     * Full MNA-style DC solve (conductance nodal analysis with ideal voltage
+     * sources via Modified Nodal Analysis). Ground = the source's "gnd" pin.
+     * Node voltages and per-branch currents are exact for the resistive model;
+     * this is still an approximation of real electronics (no AC, no transistors).
+     */
     public Result solve(ProjectData p, Map<String, ComponentBehavior> behaviors) {
         Result r = new Result();
         NodeMap nm = new NodeMap();
@@ -69,51 +75,90 @@ public final class ElectricalSolver {
             branches.add(br);
         }
 
-        // pick dominant source
+        // ---- collect nodes & ground ----
+        java.util.LinkedHashSet<String> nodeSet = new java.util.LinkedHashSet<>();
+        for (Branch br : branches) { nodeSet.add(br.n1); nodeSet.add(br.n2); }
+        nodeSet.remove(GROUND);
+        List<String> nodes = new ArrayList<>(nodeSet);
+        int nN = nodes.size();
+        java.util.function.Function<String, Integer> idxOf = nodes::indexOf;
+
+        // ---- build MNA system: [G B; B^T 0] [V; I_src] = [I; E] ----
+        int nS = 0;
+        for (Branch br : branches) if (br.isSource && br.emf > 0) nS++;
+        boolean hasAnySource = false;
+        for (Branch br : branches) if (br.isSource && br.emf > 0) { hasAnySource = true; break; }
+        if (!hasAnySource || nN == 0) { zeroAll(p); return r; }
+
+        int dim = nN + nS;
+        double[][] A = new double[dim][dim];
+        double[] rhs = new double[dim];
+
+        // pass 1: stamp conductances of ALL branches (sources get a parallel
+        // resistance too — models internal R realistically and lets shorts blow)
+        int sIdx = -1;
+        for (Branch br : branches) {
+            if (br.resistance <= 0) continue;
+            addCond(A, idxOf, br.n1, br.n2, 1.0 / br.resistance);
+        }
+        // pass 2: stamp ideal voltage sources (EMF) as MNA source columns
+        sIdx = -1;
+        for (Branch br : branches) {
+            if (!br.isSource || br.emf <= 0) continue;
+            sIdx++;
+            int i1 = idxOf.apply(br.n1), i2 = idxOf.apply(br.n2);
+            if (i1 >= 0) A[i1][nN + sIdx] += 1; else {/* n1 is GND */}
+            if (i2 >= 0) A[i2][nN + sIdx] -= 1;
+            if (i1 >= 0) A[nN + sIdx][i1] += 1;
+            if (i2 >= 0) A[nN + sIdx][i2] -= 1;
+            rhs[nN + sIdx] = br.emf;
+        }
+
+        double[] sol;
+        try { sol = solveLinear(A, rhs); }
+        catch (IllegalStateException singular) {   // floating/degenerate circuit
+            zeroAll(p);
+            return r;
+        }
+
+        // ---- short-circuit detection: path conductance between source pins ----
         Branch src = null;
         for (Branch br : branches)
             if (br.isSource && br.emf > 0 && (src == null || br.emf > src.emf)) src = br;
-        if (src == null) { zeroAll(p); return r; }
-
-        // build conductance graph of passive branches
-        Map<String, Map<String, Double>> g = new HashMap<>();
-        for (Branch br : branches) {
-            if (br == src) continue;
-            addEdge(g, br.n1, br.n2, 1.0 / br.resistance);
-        }
-        // short: source terminals directly connected, or external conductance too high
-        double extCond = g.getOrDefault(src.n1, Map.of()).getOrDefault(src.n2, 0.0);
-        boolean direct = src.n1.equals(src.n2);
-        if (direct || extCond >= SHORT_CONDUCTANCE_LIMIT) {
+        boolean directShort = src != null && src.n1.equals(src.n2);
+        // current through the source branch itself:
+        double srcCurrent = src != null ? Math.abs(sol.length > nN ? lastSourceCurrent(sol, nN, nS) : 0) : 0;
+        double expectedMax = src != null ? Math.abs(src.emf) / Math.max(src.resistance, 1e-9) : 0;
+        if (directShort || (src != null && srcCurrent > Math.max(expectedMax * 0.9, 8.0))) {
             r.hasShort = true;
             r.shortCircuitObjects.add(src.obj.id);
-            double i = src.emf / Math.max(WIRE_R, 1.0 / Math.max(extCond, 1e-9));
+            double i = directShort ? src.emf / Math.max(WIRE_R, src.resistance) : srcCurrent;
             r.current.put(src.obj.id, i); r.voltage.put(src.obj.id, src.emf);
             r.totalCurrent = i;
             src.obj.state.put("current", i); src.obj.state.put("voltage", src.emf);
             src.obj.state.put("short", 1.0);
-            for (Branch br : branches) if (br != src) { br.obj.state.put("current", 0.0); }
+            for (Branch br : branches) if (br != src) br.obj.state.put("current", 0.0);
             return r;
         }
-        src.obj.state.remove("short");
+        if (src != null) src.obj.state.remove("short");
 
-        // node voltages via DFS along best-conductance path (approximation):
-        // V(node) computed by walking from source node; simple approach: series drop along found path.
-        List<Branch> path = findPath(branches, src);
-        if (path == null) { src.obj.state.put("current", 0.0); zeroOthers(p, src); return r; }
-        double sumR = WIRE_R;
-        for (Branch br : path) sumR += br.resistance;
-        double i = src.emf / sumR;
-        r.totalCurrent = i;
-        setObj(src.obj, i, src.emf, r);
-        double v = src.emf;
-        for (Branch br : path) {
-            double u = i * br.resistance;
-            v -= u;
-            setObj(br.obj, i, u, r);
+        // ---- distribute results to every branch by its node voltages ----
+        java.util.Set<String> touched = new java.util.HashSet<>();
+        for (Branch br : branches) {
+            double v1 = br.n1.equals(GROUND) ? 0 : val(sol, idxOf.apply(br.n1));
+            double v2 = br.n2.equals(GROUND) ? 0 : val(sol, idxOf.apply(br.n2));
+            double u = v1 - v2;
+            double cur = u / br.resistance;
+            setObj(br.obj, cur, Math.abs(u), r);
+            touched.add(br.obj.id);
         }
-        zeroOthers(p, src);
+        r.totalCurrent = src != null ? Math.abs(val2(sol, idxOf, src.n1) - val2(sol, idxOf, src.n2)) / Math.max(src.resistance, 1e-9) : 0;
+        zeroOthers(p, touched);
         return r;
+    }
+
+    private static double lastSourceCurrent(double[] sol, int nN, int nS) {
+        return nS > 0 ? Math.abs(sol[nN + nS - 1]) : 0;
     }
 
     private void setObj(ProjectObject o, double cur, double vol, Result r) {
@@ -125,43 +170,55 @@ public final class ElectricalSolver {
         for (ProjectObject o : p.objects)
             if (o.kind == BodyKind.COMPONENT) { o.state.put("current", 0.0); o.state.put("voltage", 0.0); }
     }
-    private void zeroOthers(ProjectData p, Branch src) {
+    private void zeroOthers(ProjectData p, java.util.Set<String> touched) {
         for (ProjectObject o : p.objects)
-            if (o.kind == BodyKind.COMPONENT && o != src.obj && !o.state.containsKey("voltage"))
-                { o.state.put("current", 0.0); o.state.put("voltage", 0.0); }
+            if (o.kind == BodyKind.COMPONENT && !touched.contains(o.id)) {
+                o.state.put("current", 0.0); o.state.put("voltage", 0.0);
+            }
     }
 
-    private static void addEdge(Map<String, Map<String, Double>> g, String a, String b, double cond) {
-        if (a.equals(b)) return;
-        g.computeIfAbsent(a, k -> new HashMap<>()).merge(b, cond, Double::sum);
-        g.computeIfAbsent(b, k -> new HashMap<>()).merge(a, cond, Double::sum);
+    private static void addCond(double[][] A, java.util.function.Function<String, Integer> idxOf,
+                                String a, String b, double cond) {
+        int ia = a.equals(GROUND) ? -1 : idxOf.apply(a);
+        int ib = b.equals(GROUND) ? -1 : idxOf.apply(b);
+        if (ia >= 0) A[ia][ia] += cond;
+        if (ib >= 0) A[ib][ib] += cond;
+        if (ia >= 0 && ib >= 0) { A[ia][ib] -= cond; A[ib][ia] -= cond; }
     }
 
-    /** BFS through passive branches from src.n1 to src.n2 returning branch sequence. */
-    private List<Branch> findPath(List<Branch> all, Branch src) {
-        Map<String, List<Branch>> byNode = new HashMap<>();
-        for (Branch br : all) {
-            if (br == src) continue;
-            byNode.computeIfAbsent(br.n1, k -> new ArrayList<>()).add(br);
-            byNode.computeIfAbsent(br.n2, k -> new ArrayList<>()).add(br);
+    private static double val(double[] sol, int i) { return i < 0 ? 0 : sol[i]; }
+
+    private static double val2(double[] sol, java.util.function.Function<String, Integer> idxOf, String node) {
+        return node.equals(GROUND) ? 0 : sol[idxOf.apply(node)];
+    }
+
+    /** Gaussian elimination with partial pivoting. Throws on singular matrix. */
+    static double[] solveLinear(double[][] A, double[] rhs) {
+        int n = rhs.length;
+        double[][] m = new double[n][n + 1];
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(A[i], 0, m[i], 0, n);
+            m[i][n] = rhs[i];
         }
-        Set<String> visited = new HashSet<>();
-        List<Branch> acc = new ArrayList<>();
-        return dfs(byNode, src.n1, src.n2, visited, acc) ? acc : null;
-    }
-
-    private boolean dfs(Map<String, List<Branch>> byNode, String node, String goal,
-                        Set<String> visited, List<Branch> acc) {
-        if (node.equals(goal)) return true;
-        if (!visited.add(node)) return false;
-        for (Branch br : byNode.getOrDefault(node, List.of())) {
-            if (acc.contains(br)) continue;
-            String next = br.n1.equals(node) ? br.n2 : br.n1;
-            acc.add(br);
-            if (dfs(byNode, next, goal, visited, acc)) return true;
-            acc.remove(acc.size() - 1);
+        for (int col = 0; col < n; col++) {
+            int piv = col;
+            for (int r = col + 1; r < n; r++)
+                if (Math.abs(m[r][col]) > Math.abs(m[piv][col])) piv = r;
+            if (Math.abs(m[piv][col]) < 1e-12) throw new IllegalStateException("singular");
+            double[] tmp = m[col]; m[col] = m[piv]; m[piv] = tmp;
+            for (int r = col + 1; r < n; r++) {
+                double f = m[r][col] / m[col][col];
+                if (f == 0) continue;
+                for (int c = col; c <= n; c++) m[r][c] -= f * m[col][c];
+            }
         }
-        return false;
+        double[] x = new double[n];
+        for (int i = n - 1; i >= 0; i--) {
+            double s2 = m[i][n];
+            for (int j = i + 1; j < n; j++) s2 -= m[i][j] * x[j];
+            x[i] = s2 / m[i][i];
+        }
+        return x;
     }
 
     private static boolean flag(ProjectObject o, String k) {
